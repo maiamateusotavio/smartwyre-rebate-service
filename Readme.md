@@ -1,46 +1,71 @@
-# Smartwyre Developer Test Instructions
+# Smartwyre Developer Test
 
-You have been selected to complete our candidate coding exercise. Please follow the directions in this readme.
+## How to Run
 
-Clone, **DO NOT FORK**, this repository to your account on the online Git resource of your choosing (GitHub, BitBucket, GitLab, etc.). Your solution should retain previous commit history and you should utilize best practices for committing your changes to the repository.
+### Console Runner
+```bash
+cd Smartwyre.DeveloperTest.Runner
+dotnet run
+```
+The runner will prompt for a Rebate Identifier, a Product Identifier, and a Volume.
 
-You are welcome to use whatever tools you normally would when coding — including documentation, libraries, frameworks, or AI tools (such as ChatGPT or Copilot).
+### Tests
+```bash
+cd Smartwyre.DeveloperTest.Tests
+dotnet test
+```
 
-However, it is important that you fully understand your solution. As part of the interview process, we will review your code with you in detail. You should be able to:
+---
 
-- Explain the design choices you made.
-- Walk us through how your solution works.
-- Make modifications or extensions to your code during the review.
+## Packages Used
 
-Please note: if your submission appears to have been generated entirely by an AI agent or another third party, without your own understanding or contribution, it will not meet our evaluation criteria.
+| Package | Project | Purpose |
+|---|---|---|
+| `Microsoft.Extensions.DependencyInjection` | Runner | Build and configure the DI container |
+| `Moq` | Tests | Mock dependencies in unit tests |
 
-# The Exercise
+---
 
-In the 'RebateService.cs' file you will find a method for calculating a rebate. At a high level the steps for calculating a rebate are:
+## What I Changed and Why
 
- 1. Lookup the rebate that the request is being made against.
- 2. Lookup the product that the request is being made against.
- 2. Check that the rebate and request are valid to calculate the incentive type rebate.
- 3. Store the rebate calculation.
+### Dependency Inversion in the data stores
 
-What we'd like you to do is refactor the code with the following things in mind:
+The original `RebateService` was instantiating `RebateDataStore` and `ProductDataStore` directly with `new`, which made the service impossible to test in isolation. I introduced `IRebateDataStore` and `IProductDataStore` so that the service depends on abstractions rather than concrete implementations. The data stores themselves retain their original stub implementations, since actual database access was out of scope for this exercise — but the interfaces are ready to receive real implementations without any changes to the service layer.
 
- - Adherence to SOLID principles
- - Testability
- - Readability
- - Currently there are 3 known incentive types. In the future the business will want to add many more incentive types. Your solution should make it easy for developers to add new incentive types in the future.
+### Fixing the null check bug
 
-We’d also like you to 
- - Add some unit tests to the Smartwyre.DeveloperTest.Tests project to show how you would test the code that you’ve produced 
- - Run the RebateService from the Smartwyre.DeveloperTest.Runner console application accepting inputs (either via command line arguments or via prompts is fine)
+In the original code, `rebate.Incentive` was accessed inside the `switch` statement before the `rebate == null` guard, which would cause a `NullReferenceException` at runtime whenever the rebate was not found. In the refactored version, both `rebate` and `product` are checked upfront before any calculation is attempted.
 
-The only specific "rules" are:
+### Duplicate `RebateDataStore` instantiation
 
-- The solution must build
-- All tests must pass
+The original code created a second instance of `RebateDataStore` at the end of the method just to call `StoreCalculationResult`. This was unnecessary and has been removed — the same injected instance handles both operations.
 
-You are free to use any frameworks/NuGet packages that you see fit. You should plan to spend around 1 hour completing the exercise.
+### Strategy pattern for incentive type calculators
 
-Feel free to use code comments to describe your changes. You are also welcome to update this readme with any important details for us to consider.
+The biggest structural change was replacing the `switch` statement with the Strategy pattern. The original design required modifying `RebateService` every time a new incentive type was introduced, which violates the Open/Closed Principle.
 
-Once you have completed the exercise either ensure your repository is available publicly or contact the hiring manager to set up a private share.
+I created an `IRebateCalculator` interface with two methods: `CanHandle`, which tells the service whether a calculator is responsible for a given incentive type, and `Calculate`, which performs the calculation and returns `decimal?` — returning `null` to indicate that the combination of rebate, product and request is invalid (for example, a zero percentage or an unsupported incentive type).
+
+Each of the three existing incentive types has its own calculator class inside `Services/Calculators/`:
+
+| Calculator | Incentive Type | Formula |
+|---|---|---|
+| `FixedCashAmountCalculator` | `FixedCashAmount` | `Rebate.Amount` |
+| `FixedRateRebateCalculator` | `FixedRateRebate` | `Price × Percentage × Volume` |
+| `AmountPerUomCalculator` | `AmountPerUom` | `Amount × Volume` |
+
+To add a new incentive type in the future, a developer only needs to create a new class implementing `IRebateCalculator` and register it in the DI container. No existing code needs to be touched.
+
+### RebateService as an orchestrator
+
+With the calculators handling the business rules for each incentive type, `RebateService` became a clean orchestrator: fetch the rebate, fetch the product, guard against nulls, find the right calculator, delegate the calculation, and persist the result if successful. The list of calculators is injected via the constructor as `IEnumerable<IRebateCalculator>`, which is how `Microsoft.Extensions.DependencyInjection` resolves multiple registrations of the same interface.
+
+### Adding `RebateAmount` to the result
+
+The original `CalculateRebateResult` only exposed a `Success` flag, discarding the calculated amount after persisting it. I added a `RebateAmount` property to the result so that callers — and tests — can access the value that was computed and stored.
+
+---
+
+## Unit Tests
+
+Tests are organized into two classes. `CalculatorTests` covers each calculator in isolation, using `[Theory]` with `[InlineData]` to group invalid scenarios and avoid repetition. `RebateServiceTests` covers the orchestration logic of `RebateService` using mocked dependencies via Moq, verifying guard clauses, successful calculation, and whether `StoreCalculationResult` is called or not depending on the outcome.
